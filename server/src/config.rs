@@ -1,22 +1,23 @@
-
 //! Server configuration.
 
+use anyhow::{Error, Result};
+use async_compression::Level as CompressionLevel;
+use attic::cache::CacheNamePattern;
+use attic_token::SignatureType;
+use attic_token::Token;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use chrono::{Months, Utc};
+use rsa::pkcs1::EncodeRsaPrivateKey;
+use serde::{de, Deserialize};
 use std::collections::HashSet;
 use std::env;
+use std::fs::File;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::fs::{self, OpenOptions};
-use anyhow::{Error, Result};
-use async_compression::Level as CompressionLevel;
-use attic_token::SignatureType;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
-use serde::{de, Deserialize};
 use xdg::BaseDirectories;
-use rsa::pkcs1::EncodeRsaPrivateKey;
-use attic::cache::CacheNamePattern;
-use attic_token::Token;
-use chrono::{Months, Utc};
 
 use crate::access::{
     decode_token_hs256_secret_base64, decode_token_rs256_pubkey_base64,
@@ -594,11 +595,11 @@ fn load_config_from_str(s: &str) -> Result<Config> {
 pub async fn load_config(config_path: Option<&Path>) -> Option<Config> {
     // admin provided config
     if let Some(config_path) = config_path {
-       let config = match load_config_from_path(config_path) {
+        let config = match load_config_from_path(config_path) {
             Ok(config) => config,
             Err(e) => {
                 eprintln!("Error reading configuration: {e}");
-                return None
+                return None;
             }
         };
         return Some(config);
@@ -615,18 +616,15 @@ pub async fn load_config(config_path: Option<&Path>) -> Option<Config> {
         }
     }
     // Config from XDG
-    else if let Ok(config_path) = get_xdg_config_path(){
-         match load_config_from_path(&config_path) {
+    else if let Ok(config_path) = get_xdg_config_path() {
+        match load_config_from_path(&config_path) {
             Ok(config) => Some(config),
-            Err(_) => {
-                None
-            }
-         }
+            Err(_) => None,
+        }
     } else {
         eprintln!("No configuration found!");
         Option::None
     }
-
 }
 
 pub fn get_xdg_config_path() -> anyhow::Result<PathBuf> {
@@ -645,7 +643,6 @@ pub fn get_xdg_data_path() -> anyhow::Result<PathBuf> {
 
 ///Generates a root authentication token based off of a given base64 encoded rs256 token
 fn generate_root_token(rs256_secret_base64: String) -> String {
-
     // Create a JWT root token
     let in_two_years = Utc::now().checked_add_months(Months::new(24)).unwrap();
     let mut token = Token::new("root".to_string(), &in_two_years);
@@ -661,26 +658,25 @@ fn generate_root_token(rs256_secret_base64: String) -> String {
 
     let key = decode_token_rs256_secret_base64(&rs256_secret_base64).unwrap();
 
-    return token.encode(&SignatureType::RS256(key), &None, &None).unwrap();
-
+    return token
+        .encode(&SignatureType::RS256(key), &None, &None)
+        .unwrap();
 }
 ///Generates a root token from an existing jwt signing configuration, and displays it to the user
 /// Other init tasks can be done here in the future
-pub async fn reinit_from_config(config: Config) -> Result<(), Error> {
-
+pub async fn reinit_from_config(
+    config: Config,
+    init_token_file: Option<PathBuf>,
+) -> Result<(), Error> {
     //get token from the config
     //TODO: support other branhces here
     let rs256_secret_base64 = match config.jwt.signing_config {
         JWTSigningConfig::RS256VerifyOnly(_) => todo!(),
-        JWTSigningConfig::RS256SignAndVerify(rs256_key_pair) => {
-            match rs256_key_pair.to_pem() {
-                Ok(token) => {
-                    Some(BASE64_STANDARD.encode(token))
-                },
-                Err(e) => {
-                    eprintln!("Error converting the rs256 key to PEM format: {e}");
-                    None
-                }
+        JWTSigningConfig::RS256SignAndVerify(rs256_key_pair) => match rs256_key_pair.to_pem() {
+            Ok(token) => Some(BASE64_STANDARD.encode(token)),
+            Err(e) => {
+                eprintln!("Error converting the rs256 key to PEM format: {e}");
+                None
             }
         },
         JWTSigningConfig::HS256SignAndVerify(_) => todo!(),
@@ -702,14 +698,17 @@ pub async fn reinit_from_config(config: Config) -> Result<(), Error> {
         eprintln!("-----------------");
         eprintln!();
 
+        if let Some(filepath) = init_token_file {
+            let mut out = File::create(filepath)?;
+            write!(out, "{}", root_token)?;
+        };
+
         Ok(())
     } else {
         //If we failed to generate a token here, propogate an error and exit gracefully
         Err(Error::msg("Error converting rs256Key to PEM format"))
     }
-
 }
-
 
 pub async fn generate_monolithic_config() -> Result<()> {
     let data_path = get_xdg_data_path()?;
@@ -743,7 +742,7 @@ pub async fn generate_monolithic_config() -> Result<()> {
 
     let config_path = get_xdg_config_path()?;
 
-    eprintln!("writing server.toml to {}",config_path.display());
+    eprintln!("writing server.toml to {}", config_path.display());
     fs::write(&config_path, config_content.as_bytes()).await?;
 
     // Generate a JWT token
@@ -769,5 +768,4 @@ pub async fn generate_monolithic_config() -> Result<()> {
     eprintln!("-----------------");
     eprintln!();
     Ok(())
-
 }
